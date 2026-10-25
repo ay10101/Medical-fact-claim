@@ -6,6 +6,7 @@ dense vector search using FAISS.
 
 import os
 import sys
+import re
 
 # Prevent macOS OpenMP / Rust tokenizers thread conflict
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -160,16 +161,21 @@ class HealthcareRAGEngine:
         Dynamically fetches live clinical papers & articles from PubMed and Wikipedia APIs,
         combines them with gold-standard Cochrane clinical records, and ranks them by semantic similarity.
         """
-        cleaned_claim = preprocess_text(claim)
+        url_match = re.search(r"https?://\S+", claim)
+        cleaned_claim = claim.strip() if url_match else preprocess_text(claim)
         live_articles = fetch_live_clinical_evidence(cleaned_claim)
 
         # Live mode must remain source-pure: curated evidence is only a fallback when live APIs return nothing.
         if not live_articles:
-            # Strict live mode: never substitute curated data for unavailable external evidence.
             return []
 
+        # If claim was a URL and direct article was fetched, use the article's title as query for semantic comparison
+        query_text = cleaned_claim
+        if url_match and live_articles[0].get("article_title"):
+            query_text = live_articles[0]["article_title"]
+
         # Encode live retrieved texts dynamically
-        live_texts = [a["evidence_text"] for a in live_articles]
+        live_texts = [a.get("evidence_text", "") for a in live_articles]
         embeddings = self.model.encode(
             live_texts,
             normalize_embeddings=True,
@@ -185,7 +191,7 @@ class HealthcareRAGEngine:
 
         # Encode query and search ephemeral index
         query_vector = self.model.encode(
-            [cleaned_claim],
+            [query_text],
             normalize_embeddings=True,
             show_progress_bar=False,
             device=self.device
@@ -269,14 +275,20 @@ class ExternalHealthcareRAGEngine:
         return "uncertain"
 
     def retrieve_live_evidence(self, claim: str, top_k: int = 3):
-        cleaned_claim = preprocess_text(claim)
+        url_match = re.search(r"https?://\S+", claim)
+        cleaned_claim = claim.strip() if url_match else preprocess_text(claim)
         articles = fetch_live_clinical_evidence(cleaned_claim)
         if not articles:
             return []
 
+        # If claim was a URL, use the first article title as the semantic matching anchor
+        query_text = cleaned_claim
+        if url_match and articles[0].get("article_title"):
+            query_text = articles[0]["article_title"]
+
         texts = [item.get("evidence_text", "") for item in articles]
         embeddings = np.asarray(self.model.encode(texts, normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)
-        query_embedding = np.asarray(self.model.encode([cleaned_claim], normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)[0]
+        query_embedding = np.asarray(self.model.encode([query_text], normalize_embeddings=True, show_progress_bar=False, device=self.device), dtype=np.float32)[0]
         scores = np.dot(embeddings, query_embedding)
 
         results = []

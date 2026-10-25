@@ -18,7 +18,7 @@ DANGEROUS_PATTERNS = [
 ]
 
 HIGH_SIMILARITY_THRESHOLD = 0.35
-MODERATE_SIMILARITY_THRESHOLD = 0.22
+MODERATE_SIMILARITY_THRESHOLD = 0.30
 
 
 def assess_verdict_and_risk(claim: str, retrieved_evidence: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -38,6 +38,7 @@ def assess_verdict_and_risk(claim: str, retrieved_evidence: List[Dict[str, Any]]
     top_score = top_evidence.get("similarity_score", 0.0)
     top_stance = top_evidence.get("stance", "").strip().lower()
     top_topic = top_evidence.get("claim_topic", "").strip().lower()
+    correlation_score = float(top_evidence.get("correlation_score", 0.0))
 
     # Conflict detection: same topic, opposing stances, close scores
     has_conflict = any(
@@ -48,7 +49,13 @@ def assess_verdict_and_risk(claim: str, retrieved_evidence: List[Dict[str, Any]]
         for item in retrieved_evidence[1:]
     )
 
-    if top_score < MODERATE_SIMILARITY_THRESHOLD:
+    # If the top retrieved article has no concept correlation with the claim and semantic score is marginal,
+    # it is an irrelevant spurious retrieval (e.g. Chyawanprash for a cricket query).
+    if correlation_score == 0.0 and top_score < 0.38:
+        verdict = "No relevant evidence"
+        evidence_status = "No relevant clinical evidence found in trusted repository for this condition"
+        risk = "Medium"
+    elif top_score < MODERATE_SIMILARITY_THRESHOLD:
         verdict = "No relevant evidence"
         evidence_status = "No relevant clinical evidence found in trusted repository"
         risk = "Medium"

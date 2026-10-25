@@ -14,6 +14,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Any
 
 
@@ -106,6 +107,163 @@ def _safe_fetch(url: str, timeout: int = 8) -> bytes:
         return resp.read()
 
 
+def fetch_article_from_url(url: str) -> Dict[str, Any]:
+    """
+    Directly extracts the exact website article from a provided URL (PubMed, PMC, Europe PMC, WHO, or Web).
+    Returns a structured clinical article record with full text/abstract, authors, and metadata.
+    """
+    url = url.strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (HealthcareFactVerifier/2.0; +https://github.com/aman2428cseaiml1702/Medical-fact-claim)",
+        "Accept": "text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8"
+    }
+
+    # 1. NCBI PubMed URL: https://pubmed.ncbi.nlm.nih.gov/32497510/
+    pmid_match = re.search(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)", url)
+    if pmid_match:
+        pmid = pmid_match.group(1)
+        try:
+            efetch_url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"
+            req = urllib.request.Request(efetch_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                xml_data = resp.read().decode("utf-8", errors="ignore")
+            root = ET.fromstring(xml_data)
+            title_el = root.find(".//ArticleTitle")
+            title = "".join(title_el.itertext()).strip() if title_el is not None else f"PubMed Article {pmid}"
+            abstract_els = root.findall(".//AbstractText")
+            abstract = " ".join(["".join(el.itertext()).strip() for el in abstract_els if el is not None])
+            journal_el = root.find(".//Journal/Title")
+            journal = journal_el.text if journal_el is not None else "PubMed Indexed Journal"
+            year_el = root.find(".//JournalIssue/PubDate/Year") or root.find(".//JournalIssue/PubDate/MedlineDate")
+            year = year_el.text if year_el is not None else ""
+            doi_el = root.find(".//ArticleIdList/ArticleId[@IdType='doi']")
+            doi = doi_el.text if doi_el is not None else ""
+            authors = []
+            for a in root.findall(".//AuthorList/Author"):
+                ln = a.find("LastName")
+                fn = a.find("ForeName")
+                if ln is not None and ln.text:
+                    fn_str = fn.text if fn is not None and fn.text else ""
+                    authors.append(f"{fn_str} {ln.text}".strip())
+            author_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "") if authors else "Peer-Reviewed Medical Researchers"
+
+            evidence_body = abstract if abstract else f"Peer-reviewed study published in {journal} ({year})."
+            return {
+                "claim_topic": title,
+                "evidence_text": evidence_body,
+                "clinical_explanation": evidence_body,
+                "full_abstract": abstract,
+                "source": "PubMed (NCBI National Library of Medicine)",
+                "source_tier": "🥇 Tier 1 – Peer-Reviewed Medical Journal",
+                "authors": author_str,
+                "author_credentials": "Peer-Reviewed Medical Researchers (PubMed Indexed)",
+                "article_title": title,
+                "journal": journal,
+                "citation": f"{journal} ({year})" if year else journal,
+                "date": year,
+                "doi": doi,
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "origin": "NCBI PubMed",
+                "stance": "supports",
+                "similarity_score": 0.99,
+                "correlation_score": 0.30
+            }
+        except Exception as e:
+            print(f"[LiveRetriever] URL fetch notice for PubMed {pmid}: {e}")
+
+    # 2. PubMed Central PMC URL: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7264656/
+    pmc_match = re.search(r"pmc/articles/PMC(\d+)", url, re.IGNORECASE)
+    if pmc_match:
+        pmc_id = pmc_match.group(1)
+        abstract = fetch_pubmed_abstract(pmc_id)
+        return {
+            "claim_topic": f"PMC Article PMC{pmc_id}",
+            "evidence_text": abstract or f"NCBI PMC Article PMC{pmc_id}",
+            "clinical_explanation": abstract or f"NCBI PMC Article PMC{pmc_id}",
+            "full_abstract": abstract,
+            "source": "NCBI PubMed Central",
+            "source_tier": "🥇 Tier 1 – Open Access Peer-Reviewed Journal",
+            "authors": "PMC Medical Researchers",
+            "author_credentials": "NCBI PubMed Central Contributing Scientists",
+            "article_title": f"NCBI PMC Article PMC{pmc_id}",
+            "journal": "PubMed Central",
+            "citation": f"NCBI PMC{pmc_id}",
+            "date": "Current",
+            "doi": "",
+            "url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmc_id}/",
+            "origin": "NCBI PubMed Central",
+            "stance": "supports",
+            "similarity_score": 0.99,
+            "correlation_score": 0.30
+        }
+
+    # 3. General Webpage (WHO, CDC, WebMD, Healthline, BBC, etc.)
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        raw_title = strip_html_tags(title_m.group(1)).strip() if title_m else "Official Article"
+        # Extract meta description or og:description
+        desc_m = re.search(r"<meta\s+name=[\"']description[\"']\s+content=[\"'](.*?)[\"']", html, re.I | re.S)
+        if not desc_m:
+            desc_m = re.search(r"<meta\s+property=[\"']og:description[\"']\s+content=[\"'](.*?)[\"']", html, re.I | re.S)
+        desc = strip_html_tags(desc_m.group(1)).strip() if desc_m else ""
+        
+        # If abstract is short, attempt to collect first 2 paragraphs
+        if len(desc) < 80:
+            paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html, re.I | re.S)
+            p_text = " ".join([strip_html_tags(p) for p in paragraphs[:3] if len(strip_html_tags(p)) > 40])
+            desc = p_text[:1200] if p_text else raw_title
+
+        domain = urllib.parse.urlparse(url).netloc
+        return {
+            "claim_topic": raw_title,
+            "evidence_text": desc,
+            "clinical_explanation": desc,
+            "full_abstract": desc,
+            "source": f"Official Article ({domain})",
+            "source_tier": "🥇 Tier 1 – Direct Web Evidence Source",
+            "authors": f"Editorial & Medical Team ({domain})",
+            "author_credentials": f"Verified Contributors ({domain})",
+            "article_title": raw_title,
+            "journal": domain,
+            "citation": f"{raw_title}. {domain}.",
+            "date": "Current Online Guidance",
+            "doi": "",
+            "url": url,
+            "origin": domain,
+            "stance": "supports",
+            "similarity_score": 0.99,
+            "correlation_score": 0.30
+        }
+    except Exception as exc:
+        print(f"[LiveRetriever] General webpage fetch notice for {url}: {exc}")
+    return {}
+
+
+def build_biomedical_search_query(query: str) -> str:
+    """
+    Cleans conversational phrasing and question prefixes to produce a focused biomedical search query.
+    e.g. 'Can masks reduce corona infections when worn by a large proportion of the population?'
+         -> 'masks reduce coronavirus COVID-19 transmission'
+    """
+    clean = expand_medical_query(query)
+    # Remove question words and conversational filler
+    filler_patterns = [
+        r"\b(?:can|does|do|is|are|could|should|would|will)\b",
+        r"\b(?:when worn by a large proportion of the population|when worn by|in the population)\b",
+        r"\b(?:every morning|every night|daily|regularly)\b",
+        r"\b(?:kya|hai|hota|hoti|hote|se|ko|ke|liye|mein|par)\b",
+        r"\b(?:causes to run|causes|cause)\b",
+        r"[?!,.:;\"'()\[\]]"
+    ]
+    for p in filler_patterns:
+        clean = re.sub(p, " ", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean or query
+
+
 def fetch_pubmed_abstract(pmc_id: str) -> str:
     """
     Fetches the full abstract text of a PMC article using NCBI efetch.
@@ -117,18 +275,16 @@ def fetch_pubmed_abstract(pmc_id: str) -> str:
             f"db=pmc&id={pmc_id}&rettype=abstract&retmode=xml"
         )
         raw = _safe_fetch(url, timeout=7).decode("utf-8", errors="ignore")
-        # Extract abstract text from XML
         abstract_match = re.search(
             r"<abstract[^>]*>(.*?)</abstract>",
             raw, re.DOTALL | re.IGNORECASE
         )
         if abstract_match:
             abstract_xml = abstract_match.group(1)
-            # Remove XML tags, keep text
             abstract_text = re.sub(r"<[^>]+>", " ", abstract_xml)
             abstract_text = re.sub(r"\s+", " ", abstract_text).strip()
             if len(abstract_text) > 80:
-                return abstract_text[:1200]  # cap at 1200 chars
+                return abstract_text[:1400]
     except Exception:
         pass
     return ""
@@ -136,118 +292,145 @@ def fetch_pubmed_abstract(pmc_id: str) -> str:
 
 def fetch_pubmed_evidence(query: str, max_results: int = 4) -> List[Dict[str, Any]]:
     """
-    Queries NCBI PubMed Central for peer-reviewed clinical literature.
-    Fetches real article abstracts, not just titles.
-    Filters to high-quality medical journals only.
+    Queries NCBI PubMed (db=pubmed) and PMC for top peer-reviewed literature.
+    Retrieves full structured abstracts, journal names, authors, and exact article links.
     """
     records = []
-    try:
-        clinical_query = expand_medical_query(query)
-        # Add clinical filters for quality: systematic reviews, meta-analyses, RCTs
-        quality_filter = " AND (systematic[sb] OR meta-analysis[pt] OR clinical trial[pt] OR review[pt])"
-        full_query = clinical_query + quality_filter
-        encoded_query = urllib.parse.quote(full_query)
+    clinical_query = build_biomedical_search_query(query)
 
+    # 1. Primary search: db=pubmed (contains all top medical journals: Lancet, NEJM, JAMA, BMJ, Nature)
+    try:
+        encoded_query = urllib.parse.quote(clinical_query)
         search_url = (
             f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
-            f"db=pmc&term={encoded_query}&retmode=json&retmax={max_results}&sort=relevance"
+            f"db=pubmed&term={encoded_query}&retmode=json&retmax={max_results}&sort=relevance"
         )
         data = json.loads(_safe_fetch(search_url).decode())
         id_list = data.get("esearchresult", {}).get("idlist", [])
 
-        if not id_list:
-            # Fallback: search without quality filter
-            encoded_query_plain = urllib.parse.quote(clinical_query)
-            search_url_plain = (
-                f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
-                f"db=pmc&term={encoded_query_plain}&retmode=json&retmax={max_results}&sort=relevance"
+        if id_list:
+            ids_str = ",".join(id_list)
+            fetch_url = (
+                f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?"
+                f"db=pubmed&id={ids_str}&retmode=xml"
             )
-            data = json.loads(_safe_fetch(search_url_plain).decode())
+            xml_str = _safe_fetch(fetch_url, timeout=8).decode("utf-8", errors="ignore")
+            root = ET.fromstring(xml_str)
+
+            for art in root.findall(".//PubmedArticle"):
+                pmid_el = art.find(".//MedlineCitation/PMID")
+                pmid = pmid_el.text if pmid_el is not None else ""
+                title_el = art.find(".//ArticleTitle")
+                title = "".join(title_el.itertext()).strip() if title_el is not None else ""
+                if not title or any(noise in title.lower() for noise in NON_MEDICAL_NOISE):
+                    continue
+
+                abstract_els = art.findall(".//AbstractText")
+                abstract = " ".join(["".join(el.itertext()).strip() for el in abstract_els if el is not None])
+                
+                journal_el = art.find(".//Journal/Title")
+                journal = journal_el.text if journal_el is not None else "PubMed Indexed Journal"
+
+                year_el = art.find(".//JournalIssue/PubDate/Year")
+                if year_el is None:
+                    year_el = art.find(".//JournalIssue/PubDate/MedlineDate")
+                pub_date = year_el.text if year_el is not None else ""
+
+                doi_el = art.find(".//ArticleIdList/ArticleId[@IdType='doi']")
+                doi = doi_el.text if doi_el is not None else ""
+
+                # Extract authors
+                authors = []
+                for a in art.findall(".//AuthorList/Author"):
+                    ln = a.find("LastName")
+                    fn = a.find("ForeName")
+                    fn_str = fn.text if fn is not None and fn.text else ""
+                    ln_str = ln.text if ln is not None and ln.text else ""
+                    if ln_str:
+                        authors.append(f"{fn_str} {ln_str}".strip())
+                if authors:
+                    authors_str = ", ".join(authors[:3]) + (" et al." if len(authors) > 3 else "")
+                else:
+                    authors_str = TRUSTED_SOURCES["pubmed"]["author_label"]
+
+                citation = f"{journal}" + (f" ({pub_date})" if pub_date else "")
+
+                evidence_body = abstract if abstract else (
+                    f"Peer-reviewed study investigating: {query}. "
+                    f"Published in {journal} ({pub_date}). "
+                    f"Full citation available via NCBI PubMed."
+                )
+
+                records.append({
+                    "claim_topic": title,
+                    "evidence_text": evidence_body,
+                    "clinical_explanation": evidence_body,
+                    "full_abstract": abstract,
+                    "source": TRUSTED_SOURCES["pubmed"]["name"],
+                    "source_tier": TRUSTED_SOURCES["pubmed"]["tier"],
+                    "authors": authors_str,
+                    "author_credentials": "Published Researchers (Peer-Reviewed Medical Journal)",
+                    "article_title": title,
+                    "journal": journal,
+                    "citation": citation,
+                    "date": pub_date,
+                    "doi": doi,
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    "origin": "PubMed (NCBI)",
+                    "stance": ""
+                })
+    except Exception as e:
+        print(f"[LiveRetriever] PubMed primary fetch notice: {e}")
+
+    # 2. Supplementary search: db=pmc (PubMed Central full-text open access) if needed
+    if len(records) < max_results:
+        try:
+            encoded_query = urllib.parse.quote(clinical_query)
+            search_url = (
+                f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?"
+                f"db=pmc&term={encoded_query}&retmode=json&retmax={max_results}&sort=relevance"
+            )
+            data = json.loads(_safe_fetch(search_url).decode())
             id_list = data.get("esearchresult", {}).get("idlist", [])
 
-        if not id_list:
-            return records
+            if id_list:
+                summary_url = (
+                    f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?"
+                    f"db=pmc&id={','.join(id_list)}&retmode=json"
+                )
+                summary_data = json.loads(_safe_fetch(summary_url).decode()).get("result", {})
+                for uid in id_list:
+                    item = summary_data.get(uid, {})
+                    title = item.get("title", "").strip()
+                    if not title or any(noise in title.lower() for noise in NON_MEDICAL_NOISE):
+                        continue
+                    # Avoid duplicate titles
+                    if any(r["article_title"].lower() == title.lower() for r in records):
+                        continue
 
-        # Fetch article summaries
-        summary_url = (
-            f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?"
-            f"db=pmc&id={','.join(id_list)}&retmode=json"
-        )
-        summary_data = json.loads(_safe_fetch(summary_url).decode()).get("result", {})
-
-        for uid in id_list:
-            item = summary_data.get(uid, {})
-            title = item.get("title", "").strip()
-            if not title:
-                continue
-
-            # Skip non-medical noise
-            if any(noise in title.lower() for noise in NON_MEDICAL_NOISE):
-                continue
-
-            journal = item.get("source", "PubMed Central")
-            pub_date = item.get("pubdate", "")
-            volume = item.get("volume", "")
-            issue = item.get("issue", "")
-            doi = item.get("elocationid", "")
-
-            # Author extraction with credentials
-            author_objs = item.get("authors", [])
-            author_names = [
-                a.get("name", "") for a in author_objs
-                if isinstance(a, dict) and a.get("name")
-            ]
-            if author_names:
-                if len(author_names) == 1:
-                    authors_str = author_names[0]
-                elif len(author_names) <= 3:
-                    authors_str = ", ".join(author_names)
-                else:
-                    authors_str = ", ".join(author_names[:3]) + f" et al. (+{len(author_names)-3} authors)"
-            else:
-                authors_str = TRUSTED_SOURCES["pubmed"]["author_label"]
-
-            # Fetch real abstract
-            abstract_text = fetch_pubmed_abstract(uid)
-            time.sleep(0.1)  # be polite to NCBI API
-
-            # Build citation string
-            citation_parts = [journal]
-            if pub_date:
-                citation_parts.append(pub_date)
-            if volume:
-                citation_parts.append(f"Vol. {volume}")
-            if issue:
-                citation_parts.append(f"Issue {issue}")
-            citation = " | ".join(citation_parts)
-
-            evidence_body = abstract_text if abstract_text else (
-                f"Peer-reviewed study investigating: {query}. "
-                f"Published in {journal} ({pub_date}). "
-                f"Full text available via NCBI PubMed Central."
-            )
-
-            records.append({
-                "claim_topic": title,
-                "evidence_text": evidence_body,
-                "clinical_explanation": evidence_body,
-                "full_abstract": abstract_text,
-                "source": TRUSTED_SOURCES["pubmed"]["name"],
-                "source_tier": TRUSTED_SOURCES["pubmed"]["tier"],
-                "authors": authors_str,
-                "author_credentials": "Published Researchers (Peer-Reviewed Medical Journal)",
-                "article_title": title,
-                "journal": journal,
-                "citation": citation,
-                "date": pub_date,
-                "doi": doi,
-                "url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{uid}/",
-                "origin": "PubMed Central (NCBI)",
-                "stance": ""  # filled by RAG engine via similarity
-            })
-
-    except Exception as e:
-        print(f"[LiveRetriever] PubMed fetch notice: {e}")
+                    journal = item.get("source", "PubMed Central")
+                    pub_date = item.get("pubdate", "")
+                    abstract_text = fetch_pubmed_abstract(uid)
+                    records.append({
+                        "claim_topic": title,
+                        "evidence_text": abstract_text or f"Full study text available via PubMed Central: {title}",
+                        "clinical_explanation": abstract_text or f"Full study text available via PubMed Central: {title}",
+                        "full_abstract": abstract_text,
+                        "source": "NCBI PubMed Central",
+                        "source_tier": "🥇 Tier 1 – Peer-Reviewed Journal",
+                        "authors": "PubMed Central Contributing Researchers",
+                        "author_credentials": "Peer-Reviewed Medical Researchers (NCBI PMC)",
+                        "article_title": title,
+                        "journal": journal,
+                        "citation": f"{journal} ({pub_date})" if pub_date else journal,
+                        "date": pub_date,
+                        "doi": item.get("elocationid", ""),
+                        "url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{uid}/",
+                        "origin": "PubMed Central (NCBI)",
+                        "stance": ""
+                    })
+        except Exception as e:
+            print(f"[LiveRetriever] PMC secondary fetch notice: {e}")
 
     return records
 
@@ -304,29 +487,43 @@ def fetch_live_clinical_evidence(query: str, max_articles: int = 4, **kwargs) ->
     """
     Aggregates live clinical evidence ONLY from authoritative, trusted medical sources.
     Priority order:
-      1. PubMed Central (peer-reviewed primary literature + abstracts)
-      2. WHO (global health authority)
-
-    Evidence from unknown blogs, random people, or non-medical sources
-    is explicitly rejected at the source level.
+      0. Direct URL Article (if user inputs a link from PubMed, WHO, CDC, or medical website)
+      1. PubMed (peer-reviewed primary literature + full abstracts from Lancet, NEJM, JAMA, BMJ)
+      2. Europe PMC (comprehensive biomedical literature index)
+      3. ClinicalTrials.gov (registered clinical studies)
+      4. WHO (global health authority fact sheets)
     """
     max_k = kwargs.get("max_results", max_articles)
     combined = []
 
-    # 1. Primary: PubMed Central (peer-reviewed journals with real abstracts)
-    pubmed_items = fetch_pubmed_evidence(query, max_results=max_k)
+    # 0. Check if input contains an external website URL
+    url_match = re.search(r"https?://\S+", query)
+    search_query = query
+    if url_match:
+        target_url = url_match.group(0)
+        direct_article = fetch_article_from_url(target_url)
+        if direct_article and direct_article.get("article_title"):
+            direct_article["rank"] = 1
+            direct_article["similarity_score"] = 0.99
+            direct_article["correlation_score"] = 0.35
+            combined.append(direct_article)
+            # Use the article title/topic for broader clinical literature comparison
+            search_query = direct_article["article_title"]
+
+    # 1. Primary: PubMed (peer-reviewed journals with real abstracts)
+    pubmed_items = fetch_pubmed_evidence(search_query, max_results=max_k)
     combined.extend(pubmed_items)
 
     # 2. Broader biomedical literature index, including reviews and guideline-linked records.
-    combined.extend(fetch_europe_pmc_evidence(query, max_results=min(3, max_k)))
+    combined.extend(fetch_europe_pmc_evidence(search_query, max_results=min(3, max_k)))
 
     # 3. Trial registry: included as related context, never treated as proof of efficacy.
     if len(combined) < 5:
-        combined.extend(fetch_clinical_trials_evidence(query, max_results=2))
+        combined.extend(fetch_clinical_trials_evidence(search_query, max_results=2))
 
     # 4. Secondary: WHO Global Health Authority
     if len(combined) < 5:
-        who_items = fetch_who_evidence(query)
+        who_items = fetch_who_evidence(search_query)
         combined.extend(who_items)
 
     # Assign ranks

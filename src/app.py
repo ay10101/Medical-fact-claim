@@ -6,6 +6,7 @@ and receive automated verification, evidence citations, and risk assessment.
 
 import os
 import sys
+import re
 
 # Prevent macOS OpenMP / Rust tokenizers thread conflict
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -61,29 +62,67 @@ def get_live_rag_engine():
         _live_rag_engine = ExternalHealthcareRAGEngine()
     return _live_rag_engine
 
-def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_source: str = "", top_url: str = "", top_title: str = "", claim: str = "", retrieval_mode: str = "") -> str:
-    """Generates a high-impact, visual status banner with direct article link buttons and claim details."""
+def generate_verdict_banner(
+    verdict: str,
+    risk: str,
+    top_author: str = "",
+    top_source: str = "",
+    top_url: str = "",
+    top_title: str = "",
+    claim: str = "",
+    retrieval_mode: str = "",
+    top_abstract: str = "",
+    top_journal: str = "",
+    top_date: str = "",
+    top_doi: str = ""
+) -> str:
+    """Generates a high-impact, visual status banner rendering the exact website article directly on the page."""
     is_live_mode = "Live" in retrieval_mode
     mode_badge = (
-        "🌐 Retrieval Mode: <strong>LIVE — External APIs only (PubMed Central, Europe PMC, ClinicalTrials.gov, WHO)</strong>"
+        "🌐 Retrieval Mode: <strong>LIVE — External APIs (PubMed, Europe PMC, ClinicalTrials.gov, WHO)</strong>"
         if is_live_mode else
         "🗂️ Retrieval Mode: <strong>CURATED — Local clinical evidence dataset</strong>"
     )
-    article_link_btn = ""
-    if top_url and top_url != "#":
-        article_link_btn = f"""
-        <div style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.25);">
-            <div style="font-size: 13px; opacity: 0.95; margin-bottom: 6px;">
-                <strong>🔎 Investigated Claim:</strong> <em>"{claim}"</em>
-            </div>
-            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                <div style="font-size: 13px;">
-                    <strong>📄 Official Article:</strong> <span>{top_title}</span>
+
+    article_card_html = ""
+    if top_title and top_title != "Clinical Review":
+        abstract_display = ""
+        if top_abstract and len(top_abstract.strip()) > 20:
+            clean_abs = top_abstract.strip()
+            abstract_display = f"""
+            <details style="margin-top: 10px; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 10px 14px; cursor: pointer;" open>
+                <summary style="font-weight: 700; font-size: 12px; color: #f8fafc; outline: none; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    📖 Read Exact Article Abstract & Evidence on Page (Click to Collapse)
+                </summary>
+                <div style="margin-top: 8px; font-size: 13px; line-height: 1.6; color: #f1f5f9; max-height: 260px; overflow-y: auto; padding-right: 6px; font-style: normal; border-top: 1px solid rgba(255,255,255,0.15); padding-top: 6px;">
+                    "{clean_abs}"
                 </div>
-                <a href="{top_url}" target="_blank" style="background: white; color: #0f172a; padding: 6px 14px; border-radius: 6px; font-weight: 700; font-size: 13px; text-decoration: none; box-shadow: 0 2px 6px rgba(0,0,0,0.25);">
-                    🌐 Open Official Article Page ↗
-                </a>
+            </details>
+            """
+
+        doi_link = f"""<a href="https://doi.org/{top_doi}" target="_blank" style="background: rgba(255,255,255,0.18); color: white; padding: 5px 10px; border-radius: 5px; font-size: 11px; text-decoration: none;">DOI: {top_doi} ↗</a>""" if top_doi else ""
+        link_btn = f"""<a href="{top_url}" target="_blank" style="background: white; color: #0f172a; padding: 7px 15px; border-radius: 6px; font-weight: 700; font-size: 12px; text-decoration: none; box-shadow: 0 2px 8px rgba(0,0,0,0.3); display: inline-flex; align-items: center; gap: 4px;">🌐 Open Exact Website Article ↗</a>""" if (top_url and top_url != "#") else ""
+
+        article_card_html = f"""
+        <div style="margin-top: 14px; padding: 14px 16px; background: rgba(0,0,0,0.22); border-radius: 10px; border: 1px solid rgba(255,255,255,0.2);">
+            <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.9; margin-bottom: 4px; font-weight: 700;">
+                📄 Exact Official Scientific Article on Web:
             </div>
+            <div style="font-size: 16px; font-weight: 800; color: #ffffff; line-height: 1.4; margin-bottom: 8px;">
+                {top_title}
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between;">
+                <div style="font-size: 12px; opacity: 0.95;">
+                    <span>🏛️ <strong>{top_journal or top_source}</strong></span>
+                    {f"<span> • 📅 {top_date}</span>" if top_date else ""}
+                    {f"<span> • 🧑‍⚕️ {top_author}</span>" if top_author else ""}
+                </div>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    {doi_link}
+                    {link_btn}
+                </div>
+            </div>
+            {abstract_display}
         </div>
         """
 
@@ -105,7 +144,7 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🏛️ RAG Source: <strong>{top_source}</strong></span>
             </div>
-            {article_link_btn}
+            {article_card_html}
         </div>
         """
     elif verdict == "Refuted":
@@ -124,7 +163,7 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🧑‍⚕️ Evaluated by: <strong>{top_author}</strong></span>
             </div>
-            {article_link_btn}
+            {article_card_html}
         </div>
         """
     elif "Uncertain" in verdict:
@@ -145,7 +184,23 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
                 <span>•</span>
                 <span>🏛️ RAG Source: <strong>{top_source}</strong></span>
             </div>
-            {article_link_btn}
+            {article_card_html}
+        </div>
+        """
+    elif "No relevant evidence" in verdict or "No Evidence" in verdict:
+        return f"""
+        <div style="background: linear-gradient(135deg, #475569 0%, #64748b 100%); color: white; padding: 20px 24px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(100, 116, 139, 0.35); border: 2px solid #94a3b8;">
+            <div style="font-size: 21px; font-weight: 800; display: flex; align-items: center; gap: 10px;">
+                <span>ℹ️ NO RELEVANT SCIENTIFIC EVIDENCE FOUND</span>
+            </div>
+            <div style="font-size: 15px; margin-top: 8px; line-height: 1.5; opacity: 0.96;">
+                <strong>No Clinical Literature Corresponds to This Claim!</strong> We queried peer-reviewed biomedical databases (PubMed, Europe PMC, WHO, ClinicalTrials.gov), but no published clinical studies investigate or substantiate this assertion.
+            </div>
+            <div style="margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; font-size: 13px; font-weight: 600; background: rgba(0,0,0,0.18); padding: 8px 14px; border-radius: 8px;">
+                <span>⚡ Risk Level: <strong>{risk.upper()}</strong></span>
+                <span>•</span>
+                <span>📑 Evidence Status: <strong>NO RELEVANT EVIDENCE FOUND</strong></span>
+            </div>
         </div>
         """
     elif "Non-Health" in verdict:
@@ -153,20 +208,20 @@ def generate_verdict_banner(verdict: str, risk: str, top_author: str = "", top_s
         return f"""
         <div style="background: linear-gradient(135deg, #334155 0%, #475569 100%); color: white; padding: 22px 26px; border-radius: 14px; margin-bottom: 16px; box-shadow: 0 6px 20px rgba(51, 65, 85, 0.4); border: 2px solid #94a3b8;">
             <div style="font-size: 22px; font-weight: 800; display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                <span>🚫 NOT A HEALTH-RELATED QUERY</span>
+                <span>🚫 NOT A VERIFIABLE CLINICAL CLAIM</span>
             </div>
             <div style="background: rgba(255,255,255,0.1); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; border-left: 4px solid #f59e0b;">
-                <div style="font-size: 12px; opacity: 0.75; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;">❌ Rejected Query</div>
+                <div style="font-size: 12px; opacity: 0.75; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px;">❌ Filtered Query</div>
                 <div style="font-size: 15px; font-style: italic; font-weight: 600;">"{display_claim}"</div>
             </div>
             <div style="font-size: 14px; line-height: 1.6; opacity: 0.95; margin-bottom: 12px;">
-                <strong>Why was this filtered?</strong> Our NLP domain guardrail analyzed your input and determined it does not contain a verifiable medical or health claim. 
-                The system checks for recognized disease names, symptoms, treatments, medications, and health context — none were found for this query.
+                <strong>Why was this filtered?</strong> This query is either non-health related, a personal celebrity gossip rumor, or does not contain a verifiable scientific assertion. 
+                Our clinical database indexes peer-reviewed clinical trials, biomedical mechanisms, and public health guidelines — not personal medical diagnoses of private individuals or celebrities.
             </div>
             <div style="font-size: 13px; opacity: 0.85; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 10px;">
-                <strong>💡 Try a health claim instead, for example:</strong><br/>
-                &nbsp;&nbsp;• "Can eating sugar cause diabetes?" &nbsp;|&nbsp; "Does the COVID vaccine prevent infection?"<br/>
-                &nbsp;&nbsp;• "Kya sugar se diabetes hota hai?" (Hinglish) &nbsp;|&nbsp; "क्या कोविड वैक्सीन सुरक्षित है?" (Hindi)
+                <strong>💡 Try a scientific medical claim instead, for example:</strong><br/>
+                &nbsp;&nbsp;• "Can masks reduce corona infections?" &nbsp;|&nbsp; "Does eating sugar cause diabetes?"<br/>
+                &nbsp;&nbsp;• "Haldi doodh cancer ko theek karta hai" (Hinglish) &nbsp;|&nbsp; "क्या हल्दी कैंसर ठीक करती है?" (Hindi)
             </div>
         </div>
         """
@@ -197,18 +252,19 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
         )
 
     # Step 4: Preprocess
-    cleaned_claim = preprocess_text(claim)
+    has_url = bool(re.search(r"https?://\S+", claim))
+    cleaned_claim = claim.strip() if has_url else preprocess_text(claim)
 
     # Step 5: Detect Language
     lang = detect_language(claim)
 
-# Live mode uses only the keyword guardrail; it never opens the local dataset.
+    # Live mode uses only the keyword guardrail; it never opens the local dataset.
     if "Live" in mode:
         engine = None
-        health_flag = is_health_related(cleaned_claim)
+        health_flag = is_health_related(claim if has_url else cleaned_claim)
     else:
         engine = get_rag_engine()
-        health_flag = is_health_related(cleaned_claim, rag_engine=engine)
+        health_flag = is_health_related(claim if has_url else cleaned_claim, rag_engine=engine)
 
     if not health_flag:
         verdict_data = {
@@ -231,9 +287,9 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
             explanation["disclaimer"]
         )
 
-# Live mode ranks only records fetched from external APIs.
+    # Live mode ranks only records fetched from external APIs.
     if "Live" in mode:
-        retrieved = get_live_rag_engine().retrieve_live_evidence(cleaned_claim, top_k=3)
+        retrieved = get_live_rag_engine().retrieve_live_evidence(claim if has_url else cleaned_claim, top_k=3)
     else:
         retrieved = engine.retrieve_evidence(cleaned_claim, top_k=3)
 
@@ -254,11 +310,12 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
     top_journal = top_item.get("journal", "")
     top_citation = top_item.get("citation", "")
     top_date = top_item.get("date", "")
+    top_doi = top_item.get("doi", "")
     top_explanation = top_item.get("clinical_explanation", top_item.get("evidence_text", ""))
     top_full_abstract = top_item.get("full_abstract", top_item.get("evidence_text", ""))
 
-    def _quote_abstract(text: str, limit: int = 900) -> str:
-        """Format the full article abstract in apostrophes, truncated cleanly."""
+    def _quote_abstract(text: str, limit: int = 1400) -> str:
+        """Format the full article abstract in apostrophes, cleanly displayed."""
         if not text or len(text.strip()) < 20:
             return ""
         t = text.strip()
@@ -268,16 +325,20 @@ def verify_claim(claim: str, mode: str = "Curated Dataset (750 Clinical Records)
             t = (cut[:lp + 1] if lp > limit * 0.6 else cut) + " [...]"
         return f'"{t}"'
 
-    # Generate visual verdict banner with direct link button
+    # Generate visual verdict banner with exact article card directly on page
     banner_html = generate_verdict_banner(
         verdict_data["verdict"],
         verdict_data["risk"],
         top_author=top_author,
         top_source=top_source,
         top_url=top_url,
-top_title=top_title,
+        top_title=top_title,
         claim=claim,
-        retrieval_mode=mode
+        retrieval_mode=mode,
+        top_abstract=top_full_abstract,
+        top_journal=top_journal,
+        top_date=top_date,
+        top_doi=top_doi
     )
 
     # ── Format Evidence Markdown with full abstracts in apostrophes ──────────
@@ -361,6 +422,13 @@ top_title=top_title,
             f"> **🔗 Clinical Investigation**: [{top_title}]({top_url})\n\n"
             f"---\n\n"
         )
+    elif "No relevant evidence" in verdict_data["verdict"]:
+        evidence_md += (
+            f"### ℹ️ NO RELEVANT CLINICAL EVIDENCE FOUND\n\n"
+            f"> **🔎 Investigated Query**: *\"{claim}\"*\n>\n"
+            f"> **Status**: No published peer-reviewed medical papers, controlled clinical trials, or WHO guidelines in our indexed repositories address or corroborate this specific assertion.\n\n"
+            f"---\n\n"
+        )
 
     # ── ALL RETRIEVED ARTICLES (ranked list with full abstracts) ─────────────
     evidence_md += f"### 📚 All Retrieved Clinical Articles [{mode}]\n\n"
@@ -372,6 +440,7 @@ top_title=top_title,
         journal = item.get("journal", item.get("source", ""))
         date = item.get("date", "")
         citation = item.get("citation", "")
+        doi = item.get("doi", "")
         item_abstract = item.get("full_abstract", item.get("clinical_explanation", item.get("evidence_text", "")))
         abstract_q = _quote_abstract(item_abstract)
 
@@ -386,10 +455,12 @@ top_title=top_title,
             evidence_md += f"| **📰 Journal** | {journal}" + (f" ({date})" if date else "") + " |\n"
         if citation:
             evidence_md += f"| **📚 Citation** | *{citation}* |\n"
-        evidence_md += f"| **🔗 Article Link** | [{article_title}]({item['url']}) |\n\n"
+        if doi:
+            evidence_md += f"| **📄 DOI** | [{doi}](https://doi.org/{doi}) |\n"
+        evidence_md += f"| **🔗 Exact Website Article** | [Open Article on {item.get('source', 'Official Source')}]({item['url']}) |\n\n"
 
         if abstract_q:
-            evidence_md += f"**📄 Full Article Abstract**:\n\n> {abstract_q}\n\n"
+            evidence_md += f"**📄 Exact Article Abstract / Clinical Findings**:\n\n> {abstract_q}\n\n"
         evidence_md += "---\n"
 
     return (

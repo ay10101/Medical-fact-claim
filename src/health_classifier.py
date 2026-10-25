@@ -141,17 +141,34 @@ HEALTH_CONTEXT_VERBS = {
 # If the claim contains these words alongside ambiguous keywords, it's not health-related
 NONSENSE_SIGNALS = {
     "nasa", "rocket", "spaceship", "alien", "ufo", "planet", "galaxy",
-    "sports", "football", "cricket", "basketball", "baseball",
+    "cricket", "basketball", "baseball",
     "ipl", "fifa", "nba", "nfl", "premier",  # sports leagues
-    "movie", "film", "cinema", "actor", "actress", "bollywood", "netflix",
+    "movie", "film", "cinema", "bollywood", "hollywood", "netflix",
     "bank", "money", "loan", "finance", "stock", "crypto", "bitcoin",
-    "recipe", "cook", "cooking", "bake", "baking", "restaurant",
+    "recipe", "cooking", "bake", "baking", "restaurant",
     "weather", "rain", "snow", "hurricane", "tornado",
     "politics", "government", "election", "vote", "parliament",
-    "minister", "president", "politician",
     "car", "drive", "driving", "traffic", "accident",
-    "school", "college", "university", "exam", "study",
-    "music", "song", "concert", "dance",
+    "school", "college", "university", "exam",
+    "song", "concert", "dance",
+}
+
+# ── Celebrities, Public Figures & Named Individuals ─────────────────────────
+# Clinical databases (PubMed, Lancet, WHO) evaluate medical hypotheses and treatments;
+# they do NOT verify personal medical diagnoses or celebrity health gossip.
+CELEBRITY_AND_INDIVIDUAL_SIGNALS = {
+    # Cricket & Sports personalities
+    "virat", "kohli", "rohit", "sharma", "dhoni", "sachin", "tendulkar",
+    "hardik", "pandya", "bumrah", "shubman", "gill", "kl rahul", "pant",
+    "babar", "azam", "ronaldo", "messi", "neymar", "mbappe", "lebron",
+    "federer", "nadal", "djokovic", "cricketer", "footballer",
+    # Film & Entertainment celebrities
+    "salman", "shah rukh", "srk", "amitabh", "bachchan", "deepika",
+    "alia", "katrina", "ranbir", "ranveer", "kareena", "akshay",
+    "tom cruise", "taylor swift", "selena", "actor", "actress", "celebrity",
+    # Politicians & Public figures
+    "modi", "rahul gandhi", "amit shah", "kejriwal", "yogi",
+    "trump", "biden", "putin", "obama", "politician", "minister", "president",
 }
 
 
@@ -162,22 +179,45 @@ def _keyword_stage(text_lower: str, tokens: set) -> Optional[bool]:
     Returns False → definitely NOT health-related
     Returns None  → uncertain; let semantic stage decide
     """
-    # Check strong health keywords (multi-word too)
-    strong_matches: set = tokens.intersection(STRONG_HEALTH_KEYWORDS)
-    for kw in STRONG_HEALTH_KEYWORDS:
-        if " " in kw and kw in text_lower:
-            strong_matches.add(kw)
-
     # Add multi-word ambiguous keywords to token set
     extended_tokens = set(tokens)
     for kw in AMBIGUOUS_HEALTH_KEYWORDS:
         if " " in kw and kw in text_lower:
             extended_tokens.add(kw)
 
+    # 1. Celebrity Gossip / Personal Claims are strictly rejected as non-verifiable clinical claims
+    celebrity_matches = extended_tokens.intersection(CELEBRITY_AND_INDIVIDUAL_SIGNALS)
+    for cs in CELEBRITY_AND_INDIVIDUAL_SIGNALS:
+        if " " in cs and cs in text_lower:
+            celebrity_matches.add(cs)
+    if celebrity_matches:
+        return False
+
+    # 2. Detect personal health diagnosis grammar: e.g. "[Name] ko [Disease] hai / tha / hua"
+    if re.search(r"^[a-zA-Z\u0900-\u097F\s]{2,25}\s+(?:ko|ke)\s+[a-zA-Z\u0900-\u097F\s]+(?:\s+hai|\s+tha|\s+hua|\s+ho\s+gaya)\b", text_lower):
+        generic_subjects = {
+            "bacho", "bachon", "bachche", "patient", "patients", "mariz", "mareez",
+            "insan", "log", "logon", "mahila", "mahilaon", "pregnant", "elderly",
+            "adults", "children", "women", "men", "sugar", "haldi", "doodh", "pani",
+            "khansi", "bukhar", "dawa", "vaccine", "exercise", "walk", "sleeping"
+        }
+        first_word = text_lower.split()[0] if text_lower.split() else ""
+        if first_word not in generic_subjects:
+            return False
+
+    # 3. Hard nonsense signals (NASA, crypto, movie, etc.)
     nonsense_matches = extended_tokens.intersection(NONSENSE_SIGNALS)
+    if nonsense_matches:
+        return False
+
+    # Check strong health keywords (multi-word too)
+    strong_matches: set = tokens.intersection(STRONG_HEALTH_KEYWORDS)
+    for kw in STRONG_HEALTH_KEYWORDS:
+        if " " in kw and kw in text_lower:
+            strong_matches.add(kw)
+
     ambiguous_matches = extended_tokens.intersection(AMBIGUOUS_HEALTH_KEYWORDS)
     health_verb_matches = extended_tokens.intersection(HEALTH_CONTEXT_VERBS)
-    # Multi-word health verbs
     for hv in HEALTH_CONTEXT_VERBS:
         if " " in hv and hv in text_lower:
             health_verb_matches.add(hv)
@@ -231,6 +271,15 @@ def is_health_related(text: str, rag_engine=None) -> bool:
         return False
 
     text_lower = text.lower().strip()
+
+    # If the input is or contains a medical or clinical URL, accept it for retrieval
+    if re.search(r"https?://\S+", text_lower):
+        if any(domain in text_lower for domain in [
+            "pubmed", "ncbi", "nih.gov", "who.int", "cdc.gov", "cochrane",
+            "lancet", "nejm", "bmj", "jama", "mayoclinic", "health", "medical",
+            "webmd", "healthline", "nature.com", "cell.com", "sciencedirect"
+        ]):
+            return True
     tokens = set(re.findall(r"[\w\u0900-\u097F]+", text_lower))
 
     result = _keyword_stage(text_lower, tokens)
